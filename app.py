@@ -617,7 +617,7 @@ with tab_data:
 # ======================================================
 with tab_model:
 
-    st.subheader("🧠 Model Performance – PRO Dashboard")
+    st.subheader("🧠 Model Performance")
 
     # =====================================
     # LOAD DATA FROM DB
