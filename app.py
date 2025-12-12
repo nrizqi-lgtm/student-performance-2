@@ -23,80 +23,110 @@ st.set_page_config(
 # ======================================================
 st.markdown("""
 <style>
-
+/* Menggunakan Variabel Native Streamlit agar responsif terhadap Dark/Light Mode */
 :root {
-    --bg: #F5F7FA;
-    --card: #FFFFFF;
-    --text: #0D1B2A;
     --accent: #1E88E5;
-    --softblue: #E3F2FD;
-    --border: #D9E2EC;
+    --border-radius: 12px;
 }
 
 /* GLOBAL */
 .stApp {
-    background-color: var(--bg);
     font-family: 'Inter', sans-serif;
+    /* Background mengikuti tema Streamlit (tidak di-hardcode) */
 }
 
 /* HEADER */
 .header-ultra {
-    background: var(--card);
-    padding: 34px 40px;
+    background-color: var(--secondary-background-color);
+    padding: 30px 40px;
     border-radius: 0 0 20px 20px;
-    border-bottom: 2px solid var(--border);
-    box-shadow: 0px 8px 24px rgba(0,0,0,0.08);
+    border-bottom: 2px solid var(--accent);
     margin-bottom: 40px;
+    text-align: center;
 }
 
 .header-title {
-    font-size: 34px;
-    font-weight: 900;
+    font-size: 32px;
+    font-weight: 800;
     color: var(--accent);
+    margin-bottom: 5px;
 }
 
 .header-sub {
-    font-size: 15px;
-    opacity: 0.7;
+    font-size: 16px;
+    color: var(--text-color);
+    opacity: 0.8;
 }
 
 /* CARDS */
 .ultra-card {
-    background: var(--card);
-    padding: 26px 30px;
-    border-radius: 18px;
-    border: 1px solid var(--border);
-    box-shadow: 0px 3px 16px rgba(30,136,229,0.07);
-    margin-bottom: 25px;
+    background-color: var(--secondary-background-color);
+    padding: 24px;
+    border-radius: var(--border-radius);
+    border: 1px solid rgba(128, 128, 128, 0.2);
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+    margin-bottom: 20px;
+    transition: transform 0.2s;
 }
 
-/* BUTTON */
+.ultra-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 12px rgba(0, 0, 0, 0.1);
+}
+
+.ultra-card h4 {
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    opacity: 0.7;
+    margin-bottom: 8px;
+    color: var(--text-color);
+}
+
+.ultra-card p {
+    font-size: 14px;
+    opacity: 0.8;
+    color: var(--text-color);
+}
+
+/* BUTTON CUSTOMIZATION */
 div.stButton > button {
     background-color: var(--accent);
     color: white;
     font-weight: 600;
-    padding: 10px 20px;
-    border-radius: 10px;
-    transition: 0.25s;
+    border-radius: 8px;
+    border: none;
+    padding: 0.6rem 1.2rem;
+    width: 100%;
 }
 
 div.stButton > button:hover {
     background-color: #1565C0;
-    transform: translateY(-2px);
+    color: white;
 }
 
-/* SCORE BOX */
-.score-box {
-    background: var(--softblue);
-    padding: 40px;
+/* SCORE BOX (ADAPTIVE) */
+.score-box-container {
+    background: linear-gradient(135deg, #1E88E5 0%, #42A5F5 100%);
+    padding: 30px;
     border-radius: 20px;
     text-align: center;
+    color: white;
+    box-shadow: 0 8px 16px rgba(30, 136, 229, 0.2);
+    margin-bottom: 20px;
 }
 
 .score-value {
-    font-size: 76px;
+    font-size: 64px;
     font-weight: 900;
-    color: var(--accent);
+    margin: 0;
+    line-height: 1.2;
+}
+
+.score-label {
+    font-size: 18px;
+    font-weight: 500;
+    opacity: 0.9;
 }
 
 </style>
@@ -374,7 +404,7 @@ with tab_dash:
 # ======================================================
 with tab_data:
 
-    st.subheader("📁 Analisis Dataset – PRO Version")
+    st.subheader("📁 Analisis Dataset")
 
     # ------------------------------------------------------
     # LOAD DATA
@@ -430,6 +460,9 @@ with tab_data:
     # ------------------------------------------------------
     # ROW 2 — STATISTIK DESKRIPTIF & ANALISIS CATEGORY
     # ------------------------------------------------------
+    st.markdown("##### 📌 Sampel Data")
+    st.dataframe(df_model.head(), use_container_width=True)
+
     st.markdown("### 📌 Statistik Deskriptif")
     st.dataframe(df.describe(), use_container_width=True)
 
@@ -783,10 +816,6 @@ with tab_pred:
             Hours_Studied = st.number_input("Hours Studied per Day", 1, 12, 6)
             Previous_Scores = st.number_input("Previous Score", 0, 100, 75)
             Tutoring_Sessions = st.number_input("Tutoring Sessions per Week", 0, 10, 1)
-            Family_Income = st.selectbox(
-                "Family Income",
-                ["Low", "Medium", "High"]
-            ) 
 
         with col2:
             st.markdown("#### 📚 Karakter & Kondisi")
@@ -797,6 +826,10 @@ with tab_pred:
                 "Access to Learning Resources",
                 ["Low", "Medium", "High"]
             )           
+            Family_Income = st.selectbox(
+                "Family Income",
+                ["Low", "Medium", "High"]
+            ) 
             
 
         submit = st.form_submit_button("🔮 Predict", use_container_width=True)
@@ -923,7 +956,7 @@ with tab_pred:
         # =================================================================
         # SECTION: RECOMMENDATIONS
         # =================================================================
-        st.markdown("### 💡 Rekomendasi Personal (AI Generated)")
+        st.markdown("### 💡 Rekomendasi Personal")
 
         recomm = []
 
