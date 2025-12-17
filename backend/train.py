@@ -117,7 +117,7 @@ def init_db():
 
     conn.commit()
     conn.close()
-    print("✅ DB initialized.")
+    print("DB initialized.")
 
 
 # ======================================
@@ -128,7 +128,7 @@ def load_and_preprocess():
     # 1. LOAD DATA
     # -----------------------------
     if not os.path.exists(DATA_PATH):
-        print("⚠️ CSV not found — generating dummy dataset...")
+        print("CSV not found — generating dummy dataset...")
 
         df = pd.DataFrame({
             "Hours_Studied": np.random.randint(1, 10, 200),
@@ -153,7 +153,7 @@ def load_and_preprocess():
     # -----------------------------
     for feat in FEATURES:
         if feat not in df.columns:
-            print(f"⚠️ Feature '{feat}' missing → adding default values")
+            print(f"Feature '{feat}' missing → adding default values")
 
             # Numeric defaults
             if feat in ["Hours_Studied"]:
@@ -175,7 +175,7 @@ def load_and_preprocess():
 
     # Ensure target exists
     if TARGET not in df.columns:
-        print(f"⚠️ Target '{TARGET}' missing → generating dummy values")
+        print(f"Target '{TARGET}' missing → generating dummy values")
         df[TARGET] = np.random.randint(50, 100, len(df))
 
 
@@ -254,7 +254,7 @@ def train_and_evaluate(X, y):
     conn.commit()
 
     for name, model in models.items():
-        print(f"\n➡️ Training {name} ...")
+        print(f"\nTraining {name} ...")
         pipe = Pipeline([
             ("encoder", encoder),
             ("model", model)
@@ -302,7 +302,7 @@ def train_and_evaluate(X, y):
                     VALUES (?, ?, ?)
                 """, (name, i+1, float(score)))
         except Exception as e:
-            print(f"⚠️ CV error for {name}: {e}")
+            print(f"CV error for {name}: {e}")
 
         results.append({
             "model_name": name,
@@ -337,7 +337,7 @@ def save_results_to_db(results, total_data, train_size, test_size, X_train):
     best_result = sorted(results, key=lambda x: x["r2"], reverse=True)[0]
     best = best_result["pipeline"]
     best_name = best_result["model_name"]
-    print(f"\n🏆 Best Model: {best_name}")
+    print(f"\nBest Model: {best_name}")
 
     for r in results:
         cur.execute("""
@@ -356,9 +356,9 @@ def save_results_to_db(results, total_data, train_size, test_size, X_train):
         with open(MODEL_OUTPUT_BEST, "wb") as f:
             pickle.dump(best, f)
     except Exception as e:
-        print(f"⚠️ Error saving best model: {e}")
+        print(f"Error saving best model: {e}")
 
-    print("🧠 Calculating SHAP...")
+    print("Calculating SHAP...")
 
     try:
         enc = best.named_steps["encoder"]
@@ -407,10 +407,10 @@ def save_results_to_db(results, total_data, train_size, test_size, X_train):
                     (feat, float(val))
                 )
         else:
-            print("⚠️ SHAP mismatch → skipping database insertion.")
+            print("SHAP mismatch → skipping database insertion.")
 
     except Exception as e:
-        print(f"⚠️ SHAP error: {e}")
+        print(f"SHAP error: {e}")
 
     # save meta
     meta = {
@@ -424,7 +424,7 @@ def save_results_to_db(results, total_data, train_size, test_size, X_train):
 
     conn.commit()
     conn.close()
-    print("✅ Backend processing complete.")
+    print("Backend processing complete.")
 
 
 # ======================================
@@ -435,4 +435,4 @@ if __name__ == "__main__":
     X, y, total_len = load_and_preprocess()
     results, X_train, train_len, test_len = train_and_evaluate(X, y)
     save_results_to_db(results, total_len, train_len, test_len, X_train)
-    print("\n🎉 Training Completed — RUN STREAMLIT DASHBOARD")
+    print("\nTraining Completed — RUN STREAMLIT DASHBOARD")
