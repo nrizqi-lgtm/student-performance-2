@@ -129,21 +129,6 @@ def load_and_preprocess():
     # -----------------------------
     if not os.path.exists(DATA_PATH):
         print("CSV not found — generating dummy dataset...")
-
-        df = pd.DataFrame({
-            "Hours_Studied": np.random.randint(1, 10, 200),
-            "Attendance": np.random.randint(60, 100, 200),
-            "Sleep_Hours": np.random.randint(4, 10, 200),
-            "Tutoring_Sessions": np.random.randint(0, 5, 200),
-
-            # NEW FEATURES
-            "Previous_Scores": np.random.randint(50, 100, 200),
-            "Access_to_Resources": np.random.choice(["Low", "Medium", "High"], 200),
-            "Family_Income": np.random.randint(1, 10, 200),
-
-            "Exam_Score": np.random.randint(50, 100, 200)
-        })
-
     else:
         df = pd.read_csv(DATA_PATH)
 
