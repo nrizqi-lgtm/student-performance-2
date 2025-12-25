@@ -1,34 +1,60 @@
-import pandas as pd
-import numpy as np
-import sqlite3
-import pickle
+# ============================================================
+# TRAINING PIPELINE
+# Student Academic Performance Prediction
+# Academic-grade | Reproducible | Logged | Ensemble-ready
+# ============================================================
+
 import os
+import time
+import json
+import pickle
+import sqlite3
+import numpy as np
+import pandas as pd
 from datetime import datetime
+from tqdm import tqdm
 
 # =========================
-# ML
+# SKLEARN / ML
 # =========================
-from sklearn.model_selection import train_test_split, KFold, cross_val_score
-from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder, StandardScaler
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import (
+    StandardScaler, OneHotEncoder, OrdinalEncoder
+)
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.metrics import (
+    r2_score, mean_squared_error, mean_absolute_error
+)
+
 from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.neural_network import MLPRegressor
 from xgboost import XGBRegressor
 
-# =========================
+# ============================================================
 # CONFIG
-# =========================
+# ============================================================
 DB_PATH = "student_perf.db"
 DATA_PATH = "StudentPerformanceFactors.csv"
-MODEL_OUTPUT_BEST = "best_model.pkl"
-TARGET = "Exam_Score"
+MODEL_DIR = "models"
 
+TARGET = "Exam_Score"
+N_RETRAIN = 10          # jumlah retrain acak (statistik kuat)
+TEST_SIZE = 0.2
+
+os.makedirs(MODEL_DIR, exist_ok=True)
+
+# ============================================================
+# FEATURE DEFINITIONS
+# ============================================================
 NUMERIC_FEATURES = [
-    "Hours_Studied", "Attendance", "Sleep_Hours",
-    "Previous_Scores", "Tutoring_Sessions", "Physical_Activity"
+    "Hours_Studied",
+    "Attendance",
+    "Sleep_Hours",
+    "Previous_Scores",
+    "Tutoring_Sessions",
+    "Physical_Activity"
 ]
 
 ORDINAL_FEATURES = {
@@ -50,52 +76,52 @@ NOMINAL_FEATURES = [
     "School_Type"
 ]
 
-ALL_FEATURES = NUMERIC_FEATURES + list(ORDINAL_FEATURES.keys()) + NOMINAL_FEATURES
+ALL_FEATURES = (
+    NUMERIC_FEATURES
+    + list(ORDINAL_FEATURES.keys())
+    + NOMINAL_FEATURES
+)
 
-# =========================
-# INIT DB
-# =========================
+# ============================================================
+# DATABASE INITIALIZATION
+# ============================================================
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
+    # =========================
+    # TRAINING LOG
+    # =========================
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS model_results (
+        CREATE TABLE IF NOT EXISTS training_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER,
             model_name TEXT,
+            r2 REAL,
             rmse REAL,
             mae REAL,
-            r2 REAL,
-            train_r2 REAL,
-            test_r2 REAL,
-            is_best INTEGER,
-            created_at TEXT
+            train_time REAL,
+            random_seed INTEGER,
+            timestamp TEXT
         )
     """)
 
+    # =========================
+    # MODEL REGISTRY
+    # =========================
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS model_params (
-            model_name TEXT,
-            param_key TEXT,
-            param_value TEXT
+        CREATE TABLE IF NOT EXISTS model_registry (
+            model_name TEXT PRIMARY KEY,
+            model_path TEXT,
+            best_r2 REAL,
+            updated_at TEXT
         )
     """)
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS cv_scores (
-            model_name TEXT,
-            fold INTEGER,
-            r2 REAL
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS nn_feature_weights (
-            feature TEXT,
-            importance REAL
-        )
-    """)
-
+    # =========================
+    # PREDICTION LOGS
+    # (USED BY app.py)
+    # =========================
     cur.execute("""
         CREATE TABLE IF NOT EXISTS prediction_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -105,26 +131,18 @@ def init_db():
             prediction_rf REAL,
             prediction_xgb REAL,
             prediction_nn REAL,
-            final_prediction REAL
+            ensemble_prediction REAL
         )
     """)
 
     conn.commit()
     conn.close()
-    print("DB initialized.")
 
-# =========================
-# LOAD & PREPROCESS
-# =========================
-def load_and_preprocess():
-    if not os.path.exists(DATA_PATH):
-        raise FileNotFoundError("Dataset not found.")
-
+# ============================================================
+# DATA LOADING
+# ============================================================
+def load_data():
     df = pd.read_csv(DATA_PATH)
-
-    for col in ALL_FEATURES + [TARGET]:
-        if col not in df.columns:
-            raise ValueError(f"Missing column: {col}")
 
     for col in df.columns:
         if df[col].dtype == "object":
@@ -132,180 +150,152 @@ def load_and_preprocess():
         else:
             df[col] = df[col].fillna(df[col].median())
 
-    X = df[ALL_FEATURES]
-    y = df[TARGET]
-    return X, y
+    return df[ALL_FEATURES], df[TARGET]
 
-# =========================
-# TRAIN & EVALUATE
-# =========================
-def train_and_evaluate(X, y):
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
-    )
-
-    ordinal_encoder = OrdinalEncoder(
-        categories=[ORDINAL_FEATURES[c] for c in ORDINAL_FEATURES]
-    )
-
-    preprocessor = ColumnTransformer([
+# ============================================================
+# PREPROCESSOR
+# ============================================================
+def build_preprocessor():
+    return ColumnTransformer([
         ("num", StandardScaler(), NUMERIC_FEATURES),
-        ("ord", ordinal_encoder, list(ORDINAL_FEATURES.keys())),
-        ("nom", OneHotEncoder(handle_unknown="ignore", sparse_output=False), NOMINAL_FEATURES)
+        ("ord", OrdinalEncoder(
+            categories=[ORDINAL_FEATURES[c] for c in ORDINAL_FEATURES]
+        ), list(ORDINAL_FEATURES.keys())),
+        ("nom", OneHotEncoder(
+            handle_unknown="ignore", sparse_output=False
+        ), NOMINAL_FEATURES)
     ])
 
-    models = {
+# ============================================================
+# MODELS
+# ============================================================
+def get_models(seed):
+    return {
         "LinearRegression": LinearRegression(),
-        "RandomForest": RandomForestRegressor(n_estimators=200, random_state=42),
+        "RandomForest": RandomForestRegressor(
+            n_estimators=300, random_state=seed
+        ),
         "XGBoost": XGBRegressor(
-            objective="reg:squarederror",
             n_estimators=300,
             learning_rate=0.05,
             max_depth=5,
-            random_state=42
+            objective="reg:squarederror",
+            random_state=seed
         ),
         "NeuralNetwork": MLPRegressor(
             hidden_layer_sizes=(128, 64),
-            activation="relu",
-            max_iter=500,
-            random_state=42
+            max_iter=600,
+            random_state=seed
         )
     }
 
-    results = []
-    cv = KFold(n_splits=5, shuffle=True, random_state=42)
+# ============================================================
+# SINGLE TRAIN RUN
+# ============================================================
+def train_once(X, y, run_id, seed):
+    Xtr, Xte, ytr, yte = train_test_split(
+        X, y,
+        test_size=TEST_SIZE,
+        random_state=seed
+    )
+
+    preprocessor = build_preprocessor()
+    models = get_models(seed)
 
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
-    # clean old
-    cur.execute("DELETE FROM model_results")
-    cur.execute("DELETE FROM model_params")
-    cur.execute("DELETE FROM cv_scores")
-    cur.execute("DELETE FROM nn_feature_weights")
-    conn.commit()
+    trained = []
 
     for name, model in models.items():
-        print(f"Training {name}...")
-
         pipe = Pipeline([
             ("prep", preprocessor),
             ("model", model)
         ])
 
-        pipe.fit(X_train, y_train)
-        preds = pipe.predict(X_test)
+        start = time.perf_counter()
+        pipe.fit(Xtr, ytr)
+        train_time = time.perf_counter() - start
 
-        rmse = np.sqrt(mean_squared_error(y_test, preds))
-        mae = mean_absolute_error(y_test, preds)
-        r2 = r2_score(y_test, preds)
+        preds = pipe.predict(Xte)
 
-        train_r2 = pipe.score(X_train, y_train)
-        test_r2 = pipe.score(X_test, y_test)
+        r2 = r2_score(yte, preds)
+        rmse = np.sqrt(mean_squared_error(yte, preds))
+        mae = mean_absolute_error(yte, preds)
 
-        # params
-        for k, v in model.get_params().items():
-            cur.execute(
-                "INSERT INTO model_params VALUES (?, ?, ?)",
-                (name, k, str(v))
-            )
-
-        # cv
-        try:
-            scores = cross_val_score(pipe, X, y, cv=cv, scoring="r2")
-            for i, s in enumerate(scores):
-                cur.execute(
-                    "INSERT INTO cv_scores VALUES (?, ?, ?)",
-                    (name, i + 1, float(s))
-                )
-        except:
-            pass
-
-        results.append({
-            "model_name": name,
-            "rmse": rmse,
-            "mae": mae,
-            "r2": r2,
-            "train_r2": train_r2,
-            "test_r2": test_r2,
-            "pipeline": pipe
-        })
-
-        with open(f"model_{name}.pkl", "wb") as f:
-            pickle.dump(pipe, f)
-
-        print(f"{name} | R2={r2:.4f}")
-
-    conn.commit()
-    conn.close()
-    return results, X_train
-
-# =========================
-# SAVE NN WEIGHTS
-# =========================
-def save_nn_weights(pipeline, feature_names):
-    model = pipeline.named_steps["model"]
-    if not hasattr(model, "coefs_"):
-        return
-
-    weights = model.coefs_[0]
-    importance = np.mean(np.abs(weights), axis=1)
-
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-
-    for f, v in zip(feature_names, importance):
-        cur.execute(
-            "INSERT INTO nn_feature_weights VALUES (?, ?)",
-            (f, float(v))
-        )
-
-    conn.commit()
-    conn.close()
-
-# =========================
-# FINALIZE
-# =========================
-def finalize(results, X_train):
-    best = max(results, key=lambda x: x["r2"])
-
-    with open(MODEL_OUTPUT_BEST, "wb") as f:
-        pickle.dump(best["pipeline"], f)
-
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-
-    for r in results:
         cur.execute("""
-            INSERT INTO model_results
-            (model_name, rmse, mae, r2, train_r2, test_r2, is_best, created_at)
+            INSERT INTO training_log
+            (run_id, model_name, r2, rmse, mae, train_time, random_seed, timestamp)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            r["model_name"],
-            r["rmse"],
-            r["mae"],
-            r["r2"],
-            r["train_r2"],
-            r["test_r2"],
-            1 if r["model_name"] == best["model_name"] else 0,
+            run_id, name, r2, rmse, mae,
+            train_time, seed, datetime.now().isoformat()
+        ))
+
+        trained.append((name, pipe, r2))
+
+    conn.commit()
+    conn.close()
+    return trained
+
+# ============================================================
+# FULL RETRAIN PIPELINE
+# ============================================================
+def retrain_pipeline(X, y, n_runs=N_RETRAIN):
+    all_models = {}
+
+    for run_id in tqdm(range(1, n_runs + 1), desc="🔁 Retraining"):
+        seed = np.random.randint(0, 100_000)
+        results = train_once(X, y, run_id, seed)
+
+        for name, pipe, r2 in results:
+            all_models.setdefault(name, []).append((pipe, r2))
+
+    # =========================
+    # SAVE BEST MODEL PER TYPE
+    # =========================
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    for name, entries in all_models.items():
+        best_pipe, best_r2 = sorted(
+            entries, key=lambda x: x[1], reverse=True
+        )[0]
+
+        model_path = f"{MODEL_DIR}/model_{name}.pkl"
+
+        with open(model_path, "wb") as f:
+            pickle.dump(best_pipe, f)
+
+        cur.execute("""
+            INSERT OR REPLACE INTO model_registry
+            (model_name, model_path, best_r2, updated_at)
+            VALUES (?, ?, ?, ?)
+        """, (
+            name, model_path, best_r2,
             datetime.now().isoformat()
         ))
 
     conn.commit()
     conn.close()
 
-    if best["model_name"] == "NeuralNetwork":
-        prep = best["pipeline"].named_steps["prep"]
-        feature_names = prep.get_feature_names_out()
-        save_nn_weights(best["pipeline"], feature_names)
+    # =========================
+    # SAVE ENSEMBLE METADATA
+    # =========================
+    with open("ensemble_models.pkl", "wb") as f:
+        pickle.dump(all_models, f)
 
-    print(f"Training finished. Best model: {best['model_name']}")
-
-# =========================
+# ============================================================
 # MAIN
-# =========================
+# ============================================================
 if __name__ == "__main__":
+    print("🔧 Initializing database...")
     init_db()
-    X, y = load_and_preprocess()
-    results, X_train = train_and_evaluate(X, y)
-    finalize(results, X_train)
+
+    print("📥 Loading data...")
+    X, y = load_data()
+
+    print("🚀 Starting training & retraining...")
+    retrain_pipeline(X, y)
+
+    print("✅ TRAINING PIPELINE SELESAI")

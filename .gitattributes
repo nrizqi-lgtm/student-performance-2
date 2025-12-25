@@ -1,0 +1,4 @@
+myfile filter=lfs diff=lfs merge=lfs -text
+models/model_RandomForest.pkl filter=lfs diff=lfs merge=lfs -text
+models/* filter=lfs diff=lfs merge=lfs -text
+*.pkl filter=lfs diff=lfs merge=lfs -text

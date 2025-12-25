@@ -1,19 +1,133 @@
+# ============================================================
+# STREAMLIT APP – STUDENT PERFORMANCE PREDICTION
+# Clean | Stable | No Sidebar
+# ============================================================
+
 import streamlit as st
 import pandas as pd
+import numpy as np
 import sqlite3
 import pickle
-import plotly.express as px
 import json
+import os
 from datetime import datetime
+import plotly.express as px
 
-# =====================================================
+# ============================================================
 # CONFIG
-# =====================================================
+# ============================================================
+
+DB_PATH = "student_perf.db"
+MODEL_DIR = "models"
+DATA_PATH = "StudentPerformanceFactors.csv"
+TARGET_COL = "Exam_Score"
+
 st.set_page_config(
-    page_title="Student Performance Dashboard",
-    layout="wide",
-    page_icon="🎓"
+    page_title="Student Performance Prediction",
+    layout="wide"
 )
+
+# ============================================================
+# DB UTIL
+# ============================================================
+
+def get_conn():
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
+
+def query_db(query, params=None):
+    conn = get_conn()
+    df = pd.read_sql_query(query, conn, params=params)
+    conn.close()
+    return df
+
+def insert_prediction_log(input_dict, preds, ensemble):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO prediction_logs
+        (timestamp, input_json,
+         prediction_lr, prediction_rf,
+         prediction_xgb, prediction_nn,
+         ensemble_prediction)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (
+        datetime.now().isoformat(),
+        json.dumps(input_dict),
+        preds.get("lr"),
+        preds.get("rf"),
+        preds.get("xgb"),
+        preds.get("nn"),
+        ensemble
+    ))
+    conn.commit()
+    conn.close()
+
+# ============================================================
+# LOAD MODELS
+# ============================================================
+
+@st.cache_resource
+def load_models():
+    files = {
+        "lr": "model_LinearRegression.pkl",
+        "rf": "model_RandomForest.pkl",
+        "xgb": "model_XGBoost.pkl",
+        "nn": "model_NeuralNetwork.pkl"
+    }
+    models = {}
+    for k, f in files.items():
+        path = os.path.join(MODEL_DIR, f)
+        if os.path.exists(path):
+            with open(path, "rb") as fh:
+                models[k] = pickle.load(fh)
+    return models
+
+models = load_models()
+
+@st.cache_data
+def load_training_summary():
+    return query_db("""
+        SELECT model_name,
+               AVG(r2) AS mean_r2,
+               AVG(rmse) AS mean_rmse,
+               AVG(mae)  AS mean_mae,
+               COUNT(*) AS n_runs
+        FROM training_log
+        GROUP BY model_name
+    """)
+
+summary_df = load_training_summary()
+
+@st.cache_data
+def load_dataset():
+    if not os.path.exists(DATA_PATH):
+        return None, None
+
+    df = pd.read_csv(DATA_PATH)
+
+    if TARGET_COL in df.columns:
+        X = df.drop(columns=[TARGET_COL])
+        y = df[TARGET_COL]
+    else:
+        X = df
+        y = None
+
+    return X, y
+
+# ============================================================
+# LOAD DATASET (for overview only)
+# ============================================================
+
+# if os.path.exists(DATA_PATH):
+#     df_data = pd.read_csv(DATA_PATH)
+#     total_samples = len(df_data)
+# else:
+#     df_data = None
+#     total_samples = 0
+
+# ============================================================
+# HELPER UI
+# ============================================================
 
 # ======================================================
 # ADAPTIVE CSS (DARK MODE FRIENDLY)
@@ -164,257 +278,325 @@ div.stButton > button:hover {
 </style>
 """, unsafe_allow_html=True)
 
-DB_PATH = "student_perf.db"
-CSV_PATH = "StudentPerformanceFactors.csv"
-
-# =====================================================
-# UTIL
-# =====================================================
-def query_db(q):
-    conn = sqlite3.connect(DB_PATH)
-    df = pd.read_sql_query(q, conn)
-    conn.close()
-    return df
-
-@st.cache_resource
-def load_best_model():
-    with open("best_model.pkl", "rb") as f:
-        return pickle.load(f)
-
-@st.cache_resource
-def metric_card(title, value, subtitle="", icon="📊", color="#1f77b4"):
+def info_card(title, value, subtitle="", color="#1E88E5"):
     st.markdown(
         f"""
         <div class="metric-card" style="border-left: 6px solid {color};">
-            <div class="metric-title">{icon} {title}</div>
+            <div class="metric-title">{title}</div>
             <div class="metric-value">{value}</div>
             <div class="metric-subtitle">{subtitle}</div>
         </div>
         """,
         unsafe_allow_html=True
     )
-@st.cache_resource
-def load_models():
-    paths = {
-        "lr": "model_LinearRegression.pkl",
-        "nn": "model_NeuralNetwork.pkl",
-        "rf": "model_RandomForest.pkl",
-        "xgb": "model_XGBoost.pkl",
-        "best": "best_model.pkl"
-    }
 
-    models = {}
-
-    # Load masing-masing model jika ada
-    for key, path in paths.items():
-        try:
-            with open(path, "rb") as f:
-                models[key] = pickle.load(f)
-        except FileNotFoundError:
-            # show warning only if needed
-            # st.warning(f"Model file not found: {path}")
-            continue
-        except Exception as e:
-            # st.error(f"Error loading {path}: {e}")
-            continue
-
-    # --------- Fallback Aman ----------
-    # Jika BEST MODEL tidak ada → gunakan XGB jika ada
-    if "best" not in models:
-        if "xgb" in models:
-            models["best"] = models["xgb"]
-        elif "rf" in models:
-            models["best"] = models["rf"]
-        elif "lr" in models:
-            models["best"] = models["lr"]
-        elif "nn" in models:
-            models["best"] = models["nn"]
-    return models
-
-# =====================================================
-# LOAD DATA
-# =====================================================
-df = pd.read_csv(CSV_PATH)
-perf = query_db("SELECT * FROM model_results ORDER BY r2 DESC")
-
-# =====================================================
+# ============================================================
 # HEADER
-# =====================================================
-# st.title("🎓 Student Performance Prediction Dashboard")
-# st.caption("Ringkasan data, evaluasi model, dan prediksi nilai ujian")
+# ============================================================
 
-st.markdown("""
-<div class="header-ultra">
-    <div class="header-title">🎓 Student Performance AI</div>
-    <div class="header-sub">Sistem Analisis & Prediksi Nilai Siswa Terintegrasi</div>
-</div>
-""", unsafe_allow_html=True)
+st.title("🎓 Student Performance Prediction System")
+st.markdown("---")
 
-tabs = st.tabs(["📊 Overview", "📈 Data Insight", "🧠 Model Comparison", "🤖 Prediction"])
+# ============================================================
+# TABS
+# ============================================================
 
-# =====================================================
-# 📊 OVERVIEW
-# =====================================================
+tabs = st.tabs([
+    "🏠 Dashboard",
+    "🧠 Model Comparison",
+    "🤖 Prediction",
+    "📜 Logs"
+])
+
+# ============================================================
+# 🏠 DASHBOARD
+# ============================================================
+
 with tabs[0]:
-    st.subheader("📊 Ringkasan Utama")
+    st.subheader("🏠 System Overview")
 
-    best = perf.iloc[0]
-    baseline_r2 = perf["r2"].mean()
-    delta_r2 = best["r2"] - baseline_r2
+    # ==========================
+    # SAFETY CHECK
+    # ==========================
+    if summary_df.empty:
+        st.warning("⚠️ Belum ada hasil training. Jalankan `train.py` terlebih dahulu.")
+        st.stop()
 
-    c1, c2, c3 = st.columns(3)
-    c4, c5, c6 = st.columns(3)
+    # ==========================
+    # METADATA
+    # ==========================
+    best_row = summary_df.sort_values("mean_r2", ascending=False).iloc[0]
 
-    logs = query_db("SELECT * FROM prediction_logs ORDER BY id DESC LIMIT 100")
+    total_models = len(summary_df)
+    total_runs = int(summary_df["n_runs"].sum())
 
-    with c1:
-        metric_card(
-            "Total Data",
-            f"{len(df):,}",
-            "Jumlah seluruh sampel",
-            icon="📦",
-            color="#4CAF50"
-        )
+    X_data, y_data = load_dataset()
 
-    with c2:
-        metric_card(
-            "Train Size",
-            f"{int(len(df)*0.8):,}",
-            "80% data latih",
-            icon="🧪",
-            color="#2196F3"
-        )
-
-    with c3:
-        metric_card(
-            "Test Size",
-            f"{int(len(df)*0.2):,}",
-            "20% data uji",
-            icon="🧫",
-            color="#03A9F4"
-        )
-
-    with c4:
-        metric_card(
-            "Best Model",
-            best["model_name"],
-            "Model performa tertinggi",
-            icon="🏆",
-            color="#FFC107"
-        )
-
-    with c5:
-        metric_card(
-            "R² Score",
-            f"{best['r2']:.3f}",
-            f"Δ vs avg: {delta_r2:+.3f}",
-            icon="📈",
-            color="#9C27B0"
-        )
-
-    with c6:
-        metric_card(
-            "RMSE",
-            f"{best['rmse']:.2f}",
-            "Semakin kecil semakin baik",
-            icon="📉",
-            color="#F44336"
-        )
-    
-    # ==========================================================
-    # ============ ROW 5 — TABEL AKTIVITAS TERBARU =============
-    # ==========================================================
-    st.markdown("### 🕒 Aktivitas Prediksi Terbaru")
-
-    if not logs.empty:
-        # Ambil kolom yang diperlukan + copy agar aman
-        logs_display = logs[["timestamp", "final_prediction"]].copy()
-
-        # Pastikan timestamp bertipe datetime
-        logs_display["timestamp"] = pd.to_datetime(
-            logs_display["timestamp"],
-            errors="coerce"
-        )
-
-        # Format tampilan waktu
-        logs_display["timestamp"] = logs_display["timestamp"].dt.strftime("%d %b %H:%M")
-
-        # Tampilkan 10 data terakhir
-        st.dataframe(
-            logs_display.tail(10),
-            hide_index=True,
-            use_container_width=True
-        )
+    # dataset info (aman)
+    if X_data is not None:
+        total_samples = len(X_data)
+        n_features = X_data.shape[1]
     else:
-        st.info("Belum ada aktivitas prediksi yang tercatat.")
+        total_samples = "N/A"
+        n_features = "N/A"
 
-# =====================================================
-# 📈 DATA INSIGHT
-# =====================================================
-with tabs[1]:
-    st.subheader("📈 Data Insight")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        fig = px.histogram(df, x="Exam_Score", nbins=30, title="Distribusi Nilai")
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col2:
-        corr = df.select_dtypes("number").corr()
-        fig = px.imshow(corr, text_auto=True, title="Korelasi Variabel Numerik", aspect="auto")
-        st.plotly_chart(fig, use_container_width=True)
-
-    st.markdown("### 📋 Sampel Data")
-    st.dataframe(df.head(), use_container_width=True)
-
-# =====================================================
-# 🧠 MODEL COMPARISON
-# =====================================================
-with tabs[2]:
-    st.subheader("🧠 Perbandingan Model")
-
-    st.dataframe(
-        perf[["model_name", "r2", "rmse", "mae"]]
-        .rename(columns={
-            "model_name": "Model",
-            "r2": "R²",
-            "rmse": "RMSE",
-            "mae": "MAE"
-        }),
-        use_container_width=True
+    # last training time
+    last_train_df = query_db(
+        "SELECT MAX(timestamp) AS last_ts FROM training_log"
+    )
+    last_train = (
+        last_train_df["last_ts"].iloc[0]
+        if not last_train_df.empty else "N/A"
     )
 
+    # ==========================
+    # INFO CARDS
+    # ==========================
     col1, col2, col3 = st.columns(3)
+    col4, col5 = st.columns(2)
 
     with col1:
-        st.plotly_chart(
-            px.bar(perf, x="model_name", y="r2", title="R² per Model"),
-            use_container_width=True
+        info_card(
+            "📦 Total Data",
+            f"{total_samples:,}" if total_samples != "N/A" else "N/A",
+            f"{n_features} Features | Target: Exam_Score",
+            "#4CAF50"
         )
 
     with col2:
-        st.plotly_chart(
-            px.bar(perf, x="model_name", y="rmse", title="RMSE per Model"),
-            use_container_width=True
+        info_card(
+            "🧠 Models",
+            total_models,
+            "Linear | Tree | Boosting | Neural Net",
+            "#2196F3"
         )
 
     with col3:
+        info_card(
+            "🏆 Best Model",
+            best_row["model_name"],
+            f"Avg R² = {best_row['mean_r2']:.3f} | {int(best_row['n_runs'])} runs",
+            "#FFC107"
+        )
+
+    with col4:
+        info_card(
+            "🔁 Training Runs",
+            total_runs,
+            "Randomized retraining",
+            "#9C27B0"
+        )
+
+    with col5:
+        info_card(
+            "⏱ Last Training",
+            last_train.split("T")[0] if last_train != "N/A" else "N/A",
+            "Model freshness",
+            "#FF7043"
+        )
+
+    st.markdown("---")
+
+    # ==========================
+    # PERFORMANCE SUMMARY
+    # ==========================
+    st.markdown("### 📈 Average Model Performance (R²)")
+
+    st.plotly_chart(
+        px.bar(
+            summary_df.sort_values("mean_r2", ascending=False),
+            x="model_name",
+            y="mean_r2",
+            text_auto=".3f",
+            labels={
+                "model_name": "Model",
+                "mean_r2": "Average R²"
+            },
+            title="Average Cross-Run R² per Model"
+        ),
+        use_container_width=True
+    )
+
+    # ==========================
+    # SYSTEM INSIGHT
+    # ==========================
+    st.markdown("### 📌 System Insight")
+
+    st.markdown(f"""
+    - Sistem menggunakan **{total_models} model Machine Learning** dengan skema
+    **repeated randomized training**.
+    - Model terbaik saat ini adalah **{best_row['model_name']}**
+    dengan **rata-rata R² = {best_row['mean_r2']:.3f}** dari
+    **{int(best_row['n_runs'])} kali training**.
+    - Total **{total_runs} run training** tersimpan dan dapat diaudit ulang.
+    - Sistem siap digunakan untuk **ensemble prediction & analisis stabilitas**.
+    """)
+
+# ============================================================
+# 🧠 MODEL COMPARISON
+# ============================================================
+
+with tabs[1]:
+    st.subheader("🧠 Model Performance Comparison")
+
+    # =====================================================
+    # MODEL PERFORMANCE TABLE + METRICS
+    # =====================================================
+    if summary_df.empty:
+        st.info("Belum ada data training.")
+    else:
+        st.dataframe(summary_df, use_container_width=True)
+
+        # ============================
+        # Row 1: R², RMSE, MAE
+        # ============================
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            st.plotly_chart(
+                px.bar(
+                    summary_df,
+                    x="model_name",
+                    y="mean_r2",
+                    text_auto=".3f",
+                    title="R² Comparison"
+                ),
+                use_container_width=True
+            )
+
+        with col2:
+            st.plotly_chart(
+                px.bar(
+                    summary_df,
+                    x="model_name",
+                    y="mean_rmse",
+                    text_auto=".2f",
+                    title="RMSE Comparison"
+                ),
+                use_container_width=True
+            )
+
+        with col3:
+            st.plotly_chart(
+                px.bar(
+                    summary_df,
+                    x="model_name",
+                    y="mean_mae",
+                    text_auto=".2f",
+                    title="MAE Comparison"
+                ),
+                use_container_width=True
+            )
+
+    st.markdown("---")
+    st.subheader("📌 Korelasi Variabel & Distribusi Nilai")
+
+    # =====================================================
+    # LOAD DATASET
+    # =====================================================
+    X, y = load_dataset()
+
+    if X is None:
+        st.warning("Dataset tidak ditemukan.")
+        st.stop()
+
+    df_full = X.copy()
+    if y is not None:
+        df_full[TARGET_COL] = y
+
+    numeric_cols = [
+        "Hours_Studied", "Attendance", "Sleep_Hours",
+        "Previous_Scores", "Tutoring_Sessions",
+        "Physical_Activity", TARGET_COL
+    ]
+
+    corr_df = df_full[numeric_cols].corr()
+
+    # =====================================================
+    # Row 2: Correlation & Distribution (SIDE BY SIDE)
+    # =====================================================
+    col_corr, col_dist = st.columns(2)
+
+    with col_corr:
         st.plotly_chart(
-            px.bar(perf, x="model_name", y="mae", title="MAE per Model"),
+            px.imshow(
+                corr_df,
+                text_auto=".2f",
+                aspect="auto",
+                color_continuous_scale="RdBu_r",
+                title="Correlation Heatmap (Numerical Variables)"
+            ),
             use_container_width=True
         )
-    
-## ======================================================
-# 🤖 PREDICTION TAB (FINAL – CONSISTENT WITH TRAINING)
-# ======================================================
-with tabs[3]:
+
+    with col_dist:
+        st.plotly_chart(
+            px.histogram(
+                df_full,
+                x=TARGET_COL,
+                nbins=30,
+                marginal="box",
+                title="Distribusi Nilai Siswa"
+            ),
+            use_container_width=True
+        )
+
+    # =====================================================
+    # AUTOMATIC INSIGHT
+    # =====================================================
+    st.markdown("---")
+    st.subheader("🧠 Insight Otomatis")
+
+    # Correlation to target
+    target_corr = (
+        corr_df[TARGET_COL]
+        .drop(TARGET_COL)
+        .sort_values(key=abs, ascending=False)
+    )
+
+    st.markdown("**🔗 Variabel dengan korelasi tertinggi terhadap nilai:**")
+
+    for feat, val in target_corr.items():
+        emoji = "📈" if val > 0 else "📉"
+        st.markdown(
+            f"- {emoji} **{feat}** → korelasi `{val:.2f}`"
+        )
+
+    # Multicollinearity detection
+    high_corr_pairs = (
+        corr_df.abs()
+        .where(lambda x: (x > 0.7) & (x < 1))
+        .stack()
+        .reset_index()
+    )
+
+    if high_corr_pairs.empty:
+        st.success("✅ Tidak ditemukan multikolinearitas tinggi antar variabel.")
+    else:
+        st.warning("⚠️ Terdapat korelasi tinggi antar beberapa variabel:")
+        for _, row in high_corr_pairs.iterrows():
+            st.markdown(
+                f"- **{row['level_0']}** ↔ **{row['level_1']}** "
+                f"(corr = {row[0]:.2f})"
+            )
+# ============================================================
+# 🤖 PREDICTION
+# ============================================================
+
+with tabs[2]:
     st.subheader("🤖 Prediksi Nilai Siswa")
 
     models = load_models()
-    if "best" not in models:
-        st.error("Best model belum tersedia. Jalankan train.py terlebih dahulu.")
+    summary_df = load_training_summary()
+
+    if not models or summary_df.empty:
+        st.error("❌ Model belum tersedia. Jalankan train.py terlebih dahulu.")
         st.stop()
+
+    best_model_name = (
+        summary_df.sort_values("mean_r2", ascending=False)
+        .iloc[0]["model_name"]
+    )
 
     # best_model = models["best"]
 
@@ -528,21 +710,46 @@ with tabs[3]:
             else:
                 predictions[name] = None
         
-        # Best model prediction
-        if "best" in models:
+        predictions = {}
+        weights = {}
+
+        for key, model in models.items():
             try:
-                best_pred = float(models["best"].predict(df_in)[0])
+                pred = float(model.predict(df_in)[0])
+                predictions[key] = pred
+
+                # mapping key → model_name DB
+                map_name = {
+                    "lr": "LinearRegression",
+                    "rf": "RandomForest",
+                    "xgb": "XGBoost",
+                    "nn": "NeuralNetwork"
+                }
+
+                if key in map_name:
+                    r2_row = summary_df[
+                        summary_df["model_name"] == map_name[key]
+                    ]
+                    if not r2_row.empty:
+                        weights[key] = float(r2_row["mean_r2"].iloc[0])
+
             except:
-                best_pred = None
-        else:
-            best_pred = None
+                predictions[key] = None
+            
+            valid_preds = {k: v for k, v in predictions.items() if v is not None}
 
-        final_score = best_pred
+            if not valid_preds:
+                st.error("Gagal melakukan prediksi.")
+                st.stop()
 
-        if final_score is None:
-            st.error("Gagal melakukan prediksi dengan model terbaik.")
-            st.stop()
-
+            if weights:
+                final_score = sum(
+                    valid_preds[k] * weights.get(k, 0)
+                    for k in valid_preds
+                ) / sum(weights.values())
+            else:
+                final_score = np.mean(list(valid_preds.values()))
+            
         # =====================================================
         # OUTPUT: MAIN RESULT
         # =====================================================
@@ -558,6 +765,10 @@ with tabs[3]:
                 <div class="score-label">Prediksi Nilai Akhir</div>
             </div>
             """, unsafe_allow_html=True)
+        
+        std_pred = np.std(list(valid_preds.values()))
+        ci_low = final_score - 1.96 * std_pred
+        ci_high = final_score + 1.96 * std_pred
 
         # =====================================================
         # 2️⃣ MODEL COMPARISON
@@ -757,18 +968,34 @@ with tabs[3]:
             cur = conn.cursor()
             cur.execute("""
                 INSERT INTO prediction_logs
-                (timestamp, input_json, prediction_lr, prediction_rf, prediction_xgb, prediction_nn, final_prediction)
+                (timestamp, input_json,
+                prediction_lr, prediction_rf,
+                prediction_xgb, prediction_nn,
+                final_prediction)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
                 datetime.now().isoformat(),
                 json.dumps(input_dict),
-                predictions['lr'],
-                predictions['rf'],
-                predictions['xgb'],
-                predictions['nn'],
+                predictions.get("lr"),
+                predictions.get("rf"),
+                predictions.get("xgb"),
+                predictions.get("nn"),
                 final_score
             ))
             conn.commit()
             conn.close()
         except:
             pass
+
+# ============================================================
+# 📜 LOGS
+# ============================================================
+
+with tabs[3]:
+    st.subheader("📜 System Logs")
+
+    st.markdown("### 🧠 Training Logs")
+    st.dataframe(query_db("SELECT * FROM training_log ORDER BY timestamp DESC LIMIT 100"))
+
+    st.markdown("### 🤖 Prediction Logs")
+    st.dataframe(query_db("SELECT * FROM prediction_logs ORDER BY timestamp DESC LIMIT 100"))
